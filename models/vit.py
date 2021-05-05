@@ -4,8 +4,48 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
+from torch.nn.modules.utils import _pair
 
 MIN_NUM_PATCHES = 16
+
+class LocallyConnected2d(nn.Module):
+    def __init__(self, in_channels, out_channels, output_size, kernel_size, stride, bias=False, conv_init=False):
+        super(LocallyConnected2d, self).__init__()
+        output_size = _pair(output_size)
+        self.conv_init = conv_init
+        useless = torch.nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, bias=False)
+        if conv_init == True:
+            self.weight = torch.stack([useless.weight.data for i in range((output_size[0])*(output_size[1]))], axis=2)
+            self.weight = self.weight.reshape(1, out_channels, in_channels, output_size[0], output_size[1], kernel_size**2)
+            self.weight = nn.Parameter(self.weight)
+        else:
+            self.weight = torch.randn(1, out_channels, in_channels, output_size[0], output_size[1], kernel_size**2)
+            torch.nn.init.normal(self.weight,mean= useless.weight.mean(), std = useless.weight.std())
+            self.weight = nn.Parameter(self.weight)
+
+        if bias:
+            self.bias = nn.Parameter(
+                torch.randn(1, out_channels, output_size[0])
+            )
+            self.bias = torch.stack([self.bias for i in range(output_size[1])],axis=3)
+        else:
+            self.register_parameter('bias', None)
+​
+​
+        self.kernel_size = _pair(kernel_size)
+        self.stride = _pair(stride)
+​
+    def forward(self, x):
+        _, c, h, w = x.size()
+        kh, kw = self.kernel_size
+        dh, dw = self.stride
+        x = x.unfold(2, kh, dh).unfold(3, kw, dw)
+        x = x.contiguous().view(*x.size()[:-2], -1)
+        # Sum in in_channel and kernel_size dims
+        out = (x.unsqueeze(1) * self.weight).sum([2, -1])
+        if self.bias is not None:
+            out += self.bias
+        return out
 
 class Residual(nn.Module):
     def __init__(self, fn):
@@ -115,6 +155,49 @@ class ViT(nn.Module):
 
         x = rearrange(img, 'b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = p, p2 = p)
         x = self.patch_to_embedding(x)
+        b, n, _ = x.shape
+
+        cls_tokens = self.cls_token.expand(b, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        x += self.pos_embedding[:, :(n + 1)]
+        x = self.dropout(x)
+
+        x = self.transformer(x, mask)
+
+        x = self.to_cls_token(x[:, 0])
+        return self.mlp_head(x)
+
+class ViTLocal(nn.Module):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim, channels = 3, dropout = 0., emb_dropout = 0.):
+        super().__init__()
+        assert image_size % patch_size == 0, 'image dimensions must be divisible by the patch size'
+        num_patches = (image_size // patch_size) ** 2
+        patch_dim = channels * patch_size ** 2
+        assert num_patches > MIN_NUM_PATCHES, f'your number of patches ({num_patches}) is way too small for attention to be effective. try decreasing your patch size'
+
+        self.patch_size = patch_size
+
+        #(self, in_channels, out_channels, output_size, kernel_size, stride, padding=1, bias=False, conv_init = False)
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim))
+        self.patch_to_embedding = LocallyConnected2d(3,512,int(image_size/patch_size), patch_size, patch_size,)
+        self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
+        self.dropout = nn.Dropout(emb_dropout)
+
+        self.transformer = Transformer(dim, depth, heads, mlp_dim, dropout)
+
+        self.to_cls_token = nn.Identity()
+
+        self.mlp_head = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, mlp_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_dim, num_classes)
+        )
+
+    def forward(self, img, mask = None):
+        x = self.patch_to_embedding(x)
+        x = rearrange(img, 'b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = 1, p2 = 1)
         b, n, _ = x.shape
 
         cls_tokens = self.cls_token.expand(b, -1, -1)
