@@ -30,11 +30,10 @@ class LocallyConnected2d(nn.Module):
             self.bias = torch.stack([self.bias for i in range(output_size[1])],axis=3)
         else:
             self.register_parameter('bias', None)
-​
-​
+
         self.kernel_size = _pair(kernel_size)
         self.stride = _pair(stride)
-​
+
     def forward(self, x):
         _, c, h, w = x.size()
         kh, kw = self.kernel_size
@@ -129,7 +128,7 @@ class ViT(nn.Module):
         assert image_size % patch_size == 0, 'image dimensions must be divisible by the patch size'
         num_patches = (image_size // patch_size) ** 2
         patch_dim = channels * patch_size ** 2
-        assert num_patches > MIN_NUM_PATCHES, f'your number of patches ({num_patches}) is way too small for attention to be effective. try decreasing your patch size'
+        assert num_patches >= MIN_NUM_PATCHES, f'your number of patches ({num_patches}) is way too small for attention to be effective. try decreasing your patch size'
 
         self.patch_size = patch_size
 
@@ -173,7 +172,7 @@ class ViTLocal(nn.Module):
         assert image_size % patch_size == 0, 'image dimensions must be divisible by the patch size'
         num_patches = (image_size // patch_size) ** 2
         patch_dim = channels * patch_size ** 2
-        assert num_patches > MIN_NUM_PATCHES, f'your number of patches ({num_patches}) is way too small for attention to be effective. try decreasing your patch size'
+        assert num_patches >= MIN_NUM_PATCHES, f'your number of patches ({num_patches}) is way too small for attention to be effective. try decreasing your patch size'
 
         self.patch_size = patch_size
 
@@ -194,10 +193,12 @@ class ViTLocal(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(mlp_dim, num_classes)
         )
-
+        #torch.Size([64, 3, 32, 32])
+        #torch.Size([64, 512, 8, 8])
+        #torch.Size([64, 1024, 3])
     def forward(self, img, mask = None):
-        x = self.patch_to_embedding(x)
-        x = rearrange(img, 'b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = 1, p2 = 1)
+        x = self.patch_to_embedding(img)
+        x = rearrange(x, 'b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = 1, p2 = 1)
         b, n, _ = x.shape
 
         cls_tokens = self.cls_token.expand(b, -1, -1)
